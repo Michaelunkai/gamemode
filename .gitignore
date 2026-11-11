@@ -21,3 +21,12 @@ Thumbs.db
 
 # Local backups
 *.bak-*
+
+# local verification scratch
+/clonecheck/
+/dist/dl-test.zip
+/dist/exe-test/
+/dist/pkg/
+
+# release staging (artifacts live on GitHub Releases)
+/dist/

@@ -43,7 +43,7 @@ Every change is journaled into a **snapshot** and restored exactly on deactivate
 
 ### Pre-built release
 
-Download [`gamemode.exe`] from the [Releases](https://github.com/Michaelunkai/gamemode/releases) page. No installer — just run it. It installs itself into the tray and starts with Windows if you enable autostart.
+Download [`gamemode-1.0.0-windows-x64.zip`](https://github.com/Michaelunkai/gamemode/releases/download/v1.0.0/gamemode-1.0.0-windows-x64.zip) from the [Releases](https://github.com/Michaelunkai/gamemode/releases) page. No installer - unzip and run `gamemode.exe`. It installs itself into the tray and starts with Windows if you enable autostart.
 
 ### Build from source
 
@@ -54,7 +54,14 @@ cd gamemode
 cargo build --release
 ```
 
-The release binary lands at `target/release/x86_64-pc-windows-gnu/release/gamemode.exe`.
+The release binary lands at `target/x86_64-pc-windows-gnu/release/gamemode.exe`;
+build with a project-local output if your environment holds a lock on the shared target
+directory:
+
+```bash
+cargo build -p gm-gui --release --target-dir ./target/release-local
+```
+
 
 ---
 
