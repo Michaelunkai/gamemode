@@ -1,0 +1,26 @@
+[package]
+name = "gm-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "gamemode"
+path = "src/main.rs"
+
+[dependencies]
+gm-core = { path = "../gm-core" }
+windows-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
+tray-icon = "0.26"
+image = { version = "0.25", default-features = false, features = ["png"] }
+chrono.workspace = true
+dirs.workspace = true
+
+[build-dependencies]
+winres = "0.1"

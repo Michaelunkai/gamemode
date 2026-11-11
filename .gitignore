@@ -1,0 +1,23 @@
+# Rust build output
+/target/
+
+# Incremental & caches
+**/*.pdb
+**/*.rlib
+**/*.rmeta
+**/*.d
+
+# Logs
+*.log
+build-core.log
+build-core.err.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local backups
+*.bak-*
