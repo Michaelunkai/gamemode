@@ -48,6 +48,7 @@ pub struct GameDetection {
     /// Pid of the process judged to be the game, when any.
     pub pid: Option<u32>,
     pub exe: String,
+    pub path: String,
     pub title: String,
     /// Why the decision was made, for the log and the UI.
     pub reason: String,
@@ -258,6 +259,7 @@ impl Monitor {
         if let Some(b) = best {
             det.pid = Some(b.pid);
             det.exe = b.exe.clone();
+            det.path = b.path.clone();
             det.title = system::window_title(system::foreground_window());
             det.reason = if b.is_configured_game {
                 format!("{} is on the game list", b.exe)

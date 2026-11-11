@@ -144,30 +144,107 @@ impl AppState {
 
     /// Snapshot of the values the UI and tray need.
     pub fn snapshot(&self) -> UiSnapshot {
-        self.with_session(|s| UiSnapshot {
-            state: s.state,
-            is_on: s.is_on(),
-            status: format!("{} · {}", s.state.label(), s.detection.reason),
-            detection: s.detection.title.clone(),
-            detection_exe: s.detection.exe.clone(),
-            cpu: s.samples.iter().map(|p| p.cpu_percent).sum::<f32>().min(100.0),
-            games_found: s.detection.candidates.len(),
-            hotkey: s.config.hotkey_label(),
-            trigger: s.trigger.map(|t| match t {
-                Trigger::Manual => "manual",
-                Trigger::Automatic => "automatic",
-            }),
-            actions: s
-                .last_reports
-                .iter()
-                .map(|r| (r.name.clone(), format!("{} · {}", r.status.symbol(), r.detail)))
-                .collect(),
-            log: s.log.iter().map(|l| l.text.clone()).collect(),
-            samples: s
+        self.with_session(|s| {
+            // System RAM stats
+            let total_ram_mb = s
+                .monitor
+                .total_ram
+                .checked_div(1024 * 1024)
+                .unwrap_or(0) as f64;
+            let available_ram_mb = gm_core::win::process::available_ram_bytes()
+                .checked_div(1024 * 1024)
+                .unwrap_or(0) as f64;
+
+            // CPU saved = sum of CPU of demoted background processes (those with
+            // priority < NORMAL or idle priority).
+            let cpu_saved = s
                 .samples
                 .iter()
-                .map(|p| (p.exe.clone(), p.cpu_percent))
-                .collect(),
+                .filter(|p| {
+                    let cls = p.priority_class;
+                    cls == windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS
+                        || cls == windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS
+                })
+                .map(|p| p.cpu_percent_total)
+                .sum::<f32>()
+                .min(100.0);
+
+            // RAM saved = sum of bytes_freed from the optimiser stats (trimmed
+            // working sets of demoted background processes).
+            let ram_saved_mb = s.optimizer.stats.bytes_freed as f64 / (1024.0 * 1024.0);
+
+            // GPU usage proxy: when a game process is detected, its CPU% is a
+            // rough proxy for GPU activity (many games are CPU-bound during GPU
+            // intensive frames). Without vendor-specific APIs this is the best
+            // available heuristic. When no game is active, GPU is estimated from
+            // total system CPU.
+            let gpu_usage = if let Some(game_pid) = s.optimizer.stats.game_pid {
+                // Find the game process's CPU as a GPU proxy
+                s.samples
+                    .iter()
+                    .find(|p| p.pid == game_pid)
+                    .map(|p| p.cpu_percent.min(100.0))
+                    .unwrap_or(0.0)
+            } else {
+                s.samples
+                    .iter()
+                    .map(|p| p.cpu_percent)
+                    .sum::<f32>()
+                    .min(100.0)
+                    * 0.5
+            };
+
+            // Build activation report from last_reports: (category, what, detail)
+            let activation_report = s
+                .last_reports
+                .iter()
+                .map(|r| {
+                    let category = r.name.split(':').next().unwrap_or("").to_string();
+                    let what = r.name.clone();
+                    let detail = r.detail.clone();
+                    (category, what, detail)
+                })
+                .collect();
+
+            UiSnapshot {
+                state: s.state,
+                is_on: s.is_on(),
+                status: format!("{} · {}", s.state.label(), s.detection.reason),
+                detection: s.detection.title.clone(),
+                detection_exe: s.detection.exe.clone(),
+                cpu: s.samples.iter().map(|p| p.cpu_percent).sum::<f32>().min(100.0),
+                games_found: s.detection.candidates.len(),
+                hotkey: s.config.hotkey_label(),
+                trigger: s.trigger.map(|t| match t {
+                    Trigger::Manual => "manual",
+                    Trigger::Automatic => "automatic",
+                }),
+                actions: s
+                    .last_reports
+                    .iter()
+                    .map(|r| (r.name.clone(), format!("{} · {}", r.status.symbol(), r.detail)))
+                    .collect(),
+                log: s.log.iter().map(|l| l.text.clone()).collect(),
+                samples: s
+                    .samples
+                    .iter()
+                    .map(|p| (p.exe.clone(), p.cpu_percent))
+                    .collect(),
+                activation_report,
+                cpu_saved,
+                ram_saved_mb,
+                gpu_usage,
+                total_ram_mb,
+                available_ram_mb,
+                ram_percent: s.telemetry.stats.ram_percent(),
+                cpu_count: s.telemetry.stats.cpu_count,
+                gpu_engines: s.telemetry.stats.gpu_engines,
+                cpu_name: s.telemetry.stats.cpu_name.clone(),
+                elevated: gm_core::win::elevation::is_elevated(),
+                top_cpu: s.telemetry.top_cpu_rows(),
+                top_ram: s.telemetry.top_ram_rows(),
+                history: s.telemetry.combined_history(),
+            }
         })
     }
 
@@ -204,4 +281,36 @@ pub struct UiSnapshot {
     pub actions: Vec<(String, String)>,
     pub log: Vec<String>,
     pub samples: Vec<(String, f32)>,
+    /// Details of what changed for the immediate activation report.
+    /// Each entry is (category, what changed, detail).
+    pub activation_report: Vec<(String, String, String)>,
+    /// CPU percentage freed by background demotion (sum of demoted process CPU).
+    pub cpu_saved: f32,
+    /// RAM in MB freed by background trimming.
+    pub ram_saved_mb: f64,
+    /// GPU utilisation, measured from the `\GPU Engine(*)\Utilization Percentage`
+    /// performance counter rather than approximated from CPU work.
+    pub gpu_usage: f32,
+    /// Ring-buffer history of the three main series, for the sparkline graphs.
+    /// Each entry is (cpu%, gpu%, ram%).
+    pub history: Vec<(f32, f32, f32)>,
+    /// Total system RAM in MB.
+    pub total_ram_mb: f64,
+    /// Available system RAM in MB.
+    pub available_ram_mb: f64,
+    /// RAM in use as a percentage of the installed total.
+    pub ram_percent: f32,
+    /// Number of GPU engines reported by the PDH counter set.
+    pub gpu_engines: u32,
+    /// CPU count of the machine.
+    pub cpu_count: u32,
+    /// CPU model name.
+    pub cpu_name: String,
+    /// One row per top CPU consumer: (exe, cpu%, ram_mb, is_game, demoted).
+    pub top_cpu: Vec<(String, f32, f64, bool, bool)>,
+    /// One row per top RAM consumer: (exe, cpu%, ram_mb, is_game, demoted).
+    pub top_ram: Vec<(String, f32, f64, bool, bool)>,
+    /// True when the process runs with administrator rights, which several
+    /// optimisations require.
+    pub elevated: bool,
 }

@@ -18,6 +18,7 @@ pub mod optimizer;
 pub mod prelude;
 pub mod session;
 pub mod snapshot;
+pub mod telemetry;
 pub mod win;
 
 #[cfg(test)]

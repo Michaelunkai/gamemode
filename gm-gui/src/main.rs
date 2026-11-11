@@ -40,6 +40,14 @@ fn main() {
         .position(|a| a == "--hold")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u64>().ok());
+    // --lock-game <exe>: enable locked mode targeting the given executable.
+    let lock_game = args
+        .iter()
+        .position(|a| a == "--lock-game")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    // --unlock: disable locked mode.
+    let unlock = args.iter().any(|a| a == "--unlock");
 
     gm_core::init_logging(headless);
 
@@ -53,13 +61,29 @@ fn main() {
         return;
     }
 
-    let config = match Config::load() {
+    let mut config = match Config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("gamemode: could not load configuration: {e}");
             Config::default()
         }
     };
+
+    // Handle locked mode CLI flags before potentially running headless.
+    if unlock {
+        config.locked_mode = false;
+        config.locked_game_exe.clear();
+        let _ = config.save();
+        println!("Locked mode disabled.");
+        return;
+    }
+    if let Some(exe) = lock_game {
+        config.locked_mode = true;
+        config.locked_game_exe = exe.to_ascii_lowercase();
+        let _ = config.save();
+        println!("Locked mode enabled for: {}", config.locked_game_exe);
+        // If not headless, continue to GUI so user can see status.
+    }
 
     if headless {
         std::process::exit(run_headless(&mut config.clone(), hold.unwrap_or(0)));

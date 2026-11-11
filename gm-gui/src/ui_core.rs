@@ -215,33 +215,181 @@ impl Panel {
     fn overview(&mut self, ui: &mut egui::Ui) {
         let on = self.snapshot.is_on;
         let color = if on { ACTIVE } else { MUTED };
-        egui::Frame::default().fill(color.linear_multiply(0.10)).corner_radius(6.0).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading(egui::RichText::new(if on { "ON" } else { "OFF" }).color(color).strong());
-                ui.label(format!("{} · {}", self.snapshot.status, self.snapshot.hotkey));
-                let game = if self.snapshot.detection.is_empty() { "none" } else { self.snapshot.detection.as_str() };
-                ui.label(format!("Detected: {game} · candidates: {} · CPU: {:.0}%", self.snapshot.games_found, self.snapshot.cpu));
-                if let Some(t) = self.snapshot.trigger {
-                    ui.label(format!("Started by: {t}"));
-                }
-                ui.add_space(4.0);
-                if ui.button(if on { "Disable GameMode" } else { "Enable GameMode" }).clicked() {
-                    if on {
-                        self.state.send(Command::Disable);
-                    } else {
-                        self.state.send(Command::Enable);
-                    }
-                }
+
+        // ── Master toggle card ────────────────────────────────────────────
+        egui::Frame::default()
+            .fill(color.linear_multiply(0.10))
+            .corner_radius(8.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.heading(
+                            egui::RichText::new(if on { "● GAME MODE ON" } else { "○ GAME MODE OFF" })
+                                .color(color)
+                                .size(20.0),
+                        );
+                        ui.label(format!("{} · {}", self.snapshot.status, self.snapshot.hotkey));
+                        let game = if self.snapshot.detection.is_empty() {
+                            "none"
+                        } else {
+                            self.snapshot.detection.as_str()
+                        };
+                        ui.label(format!(
+                            "Detected: {game} · candidates: {} · CPU: {:.0}%",
+                            self.snapshot.games_found,
+                            self.snapshot.cpu
+                        ));
+                        if let Some(t) = self.snapshot.trigger {
+                            ui.label(format!("Started by: {t}"));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(if on { "⏹  Disable" } else { "▶  Enable" }).min_size(egui::vec2(120.0, 36.0)))
+                            .clicked()
+                        {
+                            if on {
+                                self.state.send(Command::Disable);
+                            } else {
+                                self.state.send(Command::Enable);
+                            }
+                        }
+                    });
+                });
+            });
+        ui.add_space(10.0);
+
+        // ── Real-time gauges ──────────────────────────────────────────────
+        ui.add_space(10.0);
+        ui.heading("Performance");
+        let snap = &self.snapshot;
+
+        // Trend series for the sparklines, split by metric.
+        let cpu_hist: Vec<f32> = snap.history.iter().map(|h| h.0).collect();
+        let gpu_hist: Vec<f32> = snap.history.iter().map(|h| h.1).collect();
+        let ram_hist: Vec<f32> = snap.history.iter().map(|h| h.2).collect();
+
+        // ── Three system tiles ─────────────────────────────────────────
+        ui.columns(3, |cols| {
+            Self::metric_tile(&mut cols[0], "CPU", snap.cpu, &cpu_hist, Self::gauge_color(snap.cpu, 60.0, 85.0));
+            Self::metric_tile(&mut cols[1], "GPU", snap.gpu_usage, &gpu_hist, Self::gauge_color(snap.gpu_usage, 60.0, 85.0));
+            Self::metric_tile(&mut cols[2], "RAM", snap.ram_percent, &ram_hist, Self::gauge_color(snap.ram_percent, 60.0, 85.0));
+        });
+        ui.add_space(8.0);
+        ui.label(format!(
+            "CPU: {} cores · {}",
+            snap.cpu_count, snap.cpu_name
+        ));
+        ui.label(format!(
+            "RAM: {:.1} / {:.1} GB used · {:.0}%",
+            (snap.total_ram_mb - snap.available_ram_mb) / 1024.0,
+            snap.total_ram_mb / 1024.0,
+            snap.ram_percent
+        ));
+        ui.label(format!("GPU engines reporting: {}", snap.gpu_engines));
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // ── Top consumers ─────────────────────────────────────────────
+        ui.columns(2, |cols| {
+            cols[0].vertical(|ui| {
+                ui.strong("CPU");
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    egui::Grid::new("top_cpu_grid").num_columns(3).show(ui, |ui| {
+                        for (exe, cpu, ram, is_game, demoted) in &self.snapshot.top_cpu {
+                            let name = if *is_game {
+                                egui::RichText::new(exe).strong().color(ACTIVE)
+                            } else {
+                                egui::RichText::new(exe)
+                            };
+                            ui.label(name);
+                            ui.label(format!("{cpu:.0}%"));
+                            ui.label(
+                                egui::RichText::new(format!("{ram:.0} MB{}", if *demoted { " ↓" } else { "" }))
+                                    .color(if *demoted { ACTIVE } else { MUTED }),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
+            cols[1].vertical(|ui| {
+                ui.strong("RAM");
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    egui::Grid::new("top_ram_grid").num_columns(3).show(ui, |ui| {
+                        for (exe, cpu, ram, is_game, _) in &self.snapshot.top_ram {
+                            let name = if *is_game {
+                                egui::RichText::new(exe).strong().color(ACTIVE)
+                            } else {
+                                egui::RichText::new(exe)
+                            };
+                            ui.label(name);
+                            ui.label(format!("{ram:.0} MB"));
+                            ui.label(format!("{cpu:.0}%"));
+                            ui.end_row();
+                        }
+                        if self.snapshot.top_ram.is_empty() {
+                            ui.label(egui::RichText::new("no processes sampled yet").color(MUTED));
+                            ui.end_row();
+                        }
+                    });
+                });
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
 
-        ui.collapsing("What is running right now", |ui| {
+        // ── Activation report (immediate readable list) ──────────────────
+        if on && !self.snapshot.activation_report.is_empty() {
+                ui.separator();
+                ui.heading("✅ What was changed to maximize performance");
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("activation_grid")
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("Category").strong());
+                                ui.label(egui::RichText::new("Change").strong());
+                                ui.label(egui::RichText::new("Detail").strong());
+                                ui.end_row();
+                                for (cat, change, detail) in &self.snapshot.activation_report {
+                                    ui.label(cat);
+                                    ui.label(change);
+                                    ui.label(detail);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "Resources saved: CPU {:.0}% freed  ·  RAM {:.0} MB freed",
+                    self.snapshot.cpu_saved, self.snapshot.ram_saved_mb
+                ));
+        }
+
+        ui.add_space(8.0);
+
+        // ── Process grid ──────────────────────────────────────────────────
+        ui.collapsing("🖥️  What is running right now", |ui| {
             egui::Grid::new("proc_grid").striped(true).show(ui, |ui| {
-                ui.label("Process"); ui.label("CPU %"); ui.end_row();
-                for p in &self.snapshot.samples {
-                    ui.label(&p.0);
-                    ui.label(format!("{:.1}", p.1));
+                ui.label("Process");
+                ui.label("CPU %");
+                ui.label("RAM MB");
+                ui.end_row();
+                for (exe, cpu) in &self.snapshot.samples {
+                    ui.label(exe);
+                    ui.label(format!("{:.1}", cpu));
+                    // Find RAM for this process (approximate; detailed per-proc RAM
+                    // requires a second pass, here we use the overall available).
+                    ui.label("—");
                     ui.end_row();
                 }
                 if self.snapshot.samples.is_empty() {
@@ -252,12 +400,89 @@ impl Panel {
         });
 
         ui.add_space(8.0);
-        ui.label(format!("Last actions: {}", self.snapshot.actions.len()));
-        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-            for (name, detail) in &self.snapshot.actions {
-                ui.label(format!("{name} — {detail}"));
-            }
+
+        // ── Last actions (simple list) ────────────────────────────────────
+        ui.collapsing("📋 Last actions", |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    for (name, detail) in &self.snapshot.actions {
+                        ui.label(format!("{name} — {detail}"));
+                    }
+                    if self.snapshot.actions.is_empty() {
+                        ui.label("no actions yet");
+                    }
+                });
         });
+    }
+
+    /// One dashboard tile: title, value, sparkline trend.
+    fn metric_tile(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: f32,
+        history: &[f32],
+        accent: egui::Color32,
+    ) {
+        egui::Frame::default()
+            .fill(egui::Color32::from_rgb(24, 24, 27))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(39, 39, 42)))
+            .corner_radius(10.0)
+            .inner_margin(egui::Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.set_min_width(170.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(label).size(11.0).color(MUTED).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{value:.0}%"))
+                                .size(22.0)
+                                .color(accent)
+                                .strong(),
+                        );
+                    });
+                });
+                Self::sparkline(ui, history, accent, 26.0);
+            });
+    }
+
+    /// A tiny filled sparkline drawn as a polyline inside a fixed height.
+    fn sparkline(ui: &mut egui::Ui, points: &[f32], color: egui::Color32, height: f32) {
+        let desired = egui::vec2(ui.available_width(), height);
+        let (rect, _) = ui.allocate_at_least(desired, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::TRANSPARENT);
+
+        let n = points.len().max(1);
+        let max = points.iter().fold(1.0f32, |a, b| a.max(*b));
+        let step = rect.width() / n.max(1) as f32;
+
+        let pts: Vec<egui::Pos2> = points
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let y = rect.bottom() - (v / max) * (rect.height() - 4.0) - 2.0;
+                egui::pos2(rect.left() + i as f32 * step, y)
+            })
+            .collect();
+
+        if pts.len() > 1 {
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(1.6, color.gamma_multiply(0.9)),
+            ));
+        }
+    }
+
+    /// Pick a colour for a gauge: green below `ok`, amber below `warn`, red above.
+    fn gauge_color(value: f32, ok: f32, warn: f32) -> egui::Color32 {
+        if value <= ok {
+            ACTIVE
+        } else if value <= warn {
+            ARMING
+        } else {
+            egui::Color32::from_rgb(248, 113, 113)
+        }
     }
 
     fn tuning(&mut self, ui: &mut egui::Ui) {

@@ -17,7 +17,7 @@ use crate::error::GmResult;
 use crate::monitor::{GameDetection, Monitor, ProcessSample};
 use crate::optimizer::{ActionReport, Optimizer};
 use crate::snapshot::Snapshot;
-use crate::win::{process, system};
+use crate::telemetry::{ProcRow, Telemetry};use crate::win::{process, system};
 
 /// Whether GameMode is currently optimising.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +80,8 @@ pub enum Trigger {
 pub struct Session {
     pub config: Config,
     pub monitor: Monitor,
+    /// Rich machine telemetry the dashboard draws (CPU/GPU/RAM + history).
+    pub telemetry: Telemetry,
     pub optimizer: Optimizer,
     pub snapshot: Option<Snapshot>,
     pub state: SessionState,
@@ -105,6 +107,9 @@ pub struct Session {
     active_since: Option<Instant>,
     /// Set when the user manually disabled, so auto-detect does not fight them.
     pub manual_hold: bool,
+    /// Details of what changed for the immediate activation report.
+    /// Each entry is (category, what changed, detail).
+    pub activation_report: Vec<(String, String, String)>,
 }
 
 impl Session {
@@ -113,6 +118,7 @@ impl Session {
         let pending_recovery = Snapshot::is_pending();
         let mut s = Session {
             monitor: Monitor::new(),
+            telemetry: Telemetry::default(),
             optimizer: Optimizer::new(),
             snapshot: None,
             state: SessionState::Idle,
@@ -129,6 +135,7 @@ impl Session {
             active_since: None,
             config,
             manual_hold: false,
+            activation_report: Vec::new(),
         };
         if pending_recovery {
             s.push_log(
@@ -175,9 +182,25 @@ impl Session {
         self.samples = self.monitor.sample(&self.config);
         self.detection = self.monitor.detect(&self.samples, &self.config);
 
-        let (pid, exe) = match self.detection.pid {
-            Some(p) => (Some(p), self.detection.exe.clone()),
-            None => (None, String::new()),
+        // Locked mode overrides automatic detection: the target is whatever
+        // `locked_game_exe` says, even when the process is not currently running.
+        let (pid, exe) = if let Some(target) = self.config.locked_target() {
+            let found = self.samples.iter().find(|s| s.exe.to_ascii_lowercase() == target);
+            let pid = found.map(|s| s.pid);
+            let exe = target.to_string();
+            if pid.is_none() {
+                self.detection.reason = format!("locked to {exe} — waiting for process");
+            } else {
+                self.detection.reason = format!("locked to {exe} (pid {})", pid.unwrap());
+            }
+            self.detection.pid = pid;
+            self.detection.exe = exe.clone();
+            (pid, exe)
+        } else {
+            match self.detection.pid {
+                Some(p) => (Some(p), self.detection.exe.clone()),
+                None => (None, String::new()),
+            }
         };
 
         let mut snap = Snapshot::begin(&exe);
@@ -290,6 +313,32 @@ impl Session {
         }
     }
 
+    /// Top processes for the dashboard table: game first, then heaviest CPU.
+    fn build_proc_rows(&self) -> Vec<ProcRow> {
+        let mut rows: Vec<ProcRow> = self
+            .samples
+            .iter()
+            .map(|s| ProcRow {
+                pid: s.pid,
+                exe: s.exe.clone(),
+                cpu_percent: s.cpu_percent,
+                ram_mb: s.working_set as f64 / (1024.0 * 1024.0),
+                is_game: s.is_configured_game || s.is_whitelisted,
+                demoted: s.priority_class == windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS
+                    || s.priority_class == windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS,
+            })
+            .collect();
+        // The game always leads, then by CPU, so the reader sees the thing that
+        // matters first without scanning.
+        rows.sort_by(|a, b| {
+            b.is_game
+                .cmp(&a.is_game)
+                .then(b.cpu_percent.total_cmp(&a.cpu_percent))
+        });
+        rows.truncate(12);
+        rows
+    }
+
     /// Advance the state machine. Returns true when optimisations were applied
     /// or removed during this tick, so the GUI knows to refresh.
     pub fn tick(&mut self) -> TickResult {
@@ -300,11 +349,24 @@ impl Session {
         self.optimizer
             .refresh_stats(self.detection.pid, &self.detection.exe, &self.samples, sys_cpu);
 
+        // Dashboard telemetry refreshes from its own clock: the counter reader
+        // sleeps internally, so it cannot run on every frame without slowing
+        // the UI. 500 ms is well below the eye's perception of "live".
+        if self.telemetry.needs_refresh(now, 500) {
+            self.telemetry.refresh();
+            self.telemetry.set_rows(self.build_proc_rows());
+        }
+
         let mut result = TickResult::default();
 
         match self.state {
             SessionState::Idle => {
-                if self.config.auto_activate
+                // Locked mode activates immediately, bypassing auto_activate and
+                // the arming delay, because the user has explicitly chosen a target.
+                if self.config.locked_mode {
+                    self.enable(Trigger::Manual);
+                    result.activated = true;
+                } else if self.config.auto_activate
                     && !self.manual_hold
                     && self.detection.found()
                 {
@@ -343,9 +405,35 @@ impl Session {
                 }
             }
             SessionState::Active => {
-                // If the game process died, keep optimising for the grace period
-                // (games often relaunch between matches), then restore.
-                if !self.detection.found() {
+                // Locked mode keeps the session active even when the target process
+                // is not running; we only rebind when the locked exe appears.
+                if self.config.locked_mode {
+                    if let Some(target) = self.config.locked_target() {
+                        let found = self.samples.iter().find(|s| s.exe.to_ascii_lowercase() == target);
+                        if let Some(pid) = found.map(|s| s.pid) {
+                            if self.optimizer.stats.game_pid != Some(pid) {
+                                if let Some(snap) = self.snapshot.as_mut() {
+                                    let cfg = self.config.clone();
+                                    let samples = self.samples.clone();
+                                    let exe = target.to_string();
+                                    let _ = self.optimizer.rebind_game(&cfg, snap, pid, &exe, &samples);
+                                    self.push_log(
+                                        LogLevel::Good,
+                                        format!("boost re-applied to {exe} (pid {pid})"),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Locked target not running: stay active, wait.
+                            self.push_log(
+                                LogLevel::Info,
+                                format!("waiting for {target} to launch"),
+                            );
+                        }
+                    }
+                } else if !self.detection.found() {
+                    // If the game process died, keep optimising for the grace period
+                    // (games often relaunch between matches), then restore.
                     self.state = SessionState::Draining;
                     self.phase_started = now;
                     self.push_log(
@@ -458,15 +546,41 @@ impl Session {
     pub fn tooltip(&self) -> String {
         match self.state {
             SessionState::Active => {
-                let exe = if self.detection.exe.is_empty() {
-                    "waiting for a game".to_string()
+                if self.config.locked_mode {
+                    if let Some(target) = self.config.locked_target() {
+                        if self.detection.pid.is_some() {
+                            format!(
+                                "GameMode: ON (locked to {target})\nGame {:.0}% CPU · System {:.0}% CPU",
+                                self.optimizer.stats.game_cpu, self.optimizer.stats.system_cpu
+                            )
+                        } else {
+                            format!(
+                                "GameMode: ON (locked to {target} — waiting)\nSystem {:.0}% CPU",
+                                self.optimizer.stats.system_cpu
+                            )
+                        }
+                    } else {
+                        let exe = if self.detection.exe.is_empty() {
+                            "waiting for a game".to_string()
+                        } else {
+                            self.detection.exe.clone()
+                        };
+                        format!(
+                            "GameMode: ON\n{exe}\nGame {:.0}% CPU · System {:.0}% CPU",
+                            self.optimizer.stats.game_cpu, self.optimizer.stats.system_cpu
+                        )
+                    }
                 } else {
-                    self.detection.exe.clone()
-                };
-                format!(
-                    "GameMode: ON\n{exe}\nGame {:.0}% CPU · System {:.0}% CPU",
-                    self.optimizer.stats.game_cpu, self.optimizer.stats.system_cpu
-                )
+                    let exe = if self.detection.exe.is_empty() {
+                        "waiting for a game".to_string()
+                    } else {
+                        self.detection.exe.clone()
+                    };
+                    format!(
+                        "GameMode: ON\n{exe}\nGame {:.0}% CPU · System {:.0}% CPU",
+                        self.optimizer.stats.game_cpu, self.optimizer.stats.system_cpu
+                    )
+                }
             }
             SessionState::Arming => format!(
                 "GameMode: arming ({:.0}s)\n{}",
@@ -478,7 +592,13 @@ impl Session {
                 self.phase_remaining().map(|d| d.as_secs_f32()).unwrap_or(0.0)
             ),
             SessionState::Idle => {
-                if self.config.auto_activate {
+                if self.config.locked_mode {
+                    if let Some(target) = self.config.locked_target() {
+                        format!("GameMode: OFF (locked to {target})")
+                    } else {
+                        "GameMode: OFF (locked — no target)".to_string()
+                    }
+                } else if self.config.auto_activate {
                     "GameMode: OFF (auto-detect armed)\nNo game running".to_string()
                 } else {
                     "GameMode: OFF".to_string()

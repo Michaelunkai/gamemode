@@ -215,6 +215,15 @@ pub struct Config {
     /// Hide the main window to the tray instead of exiting on close.
     pub close_to_tray: bool,
     pub theme_dark: bool,
+    /// When true GameMode ignores automatic detection and only boosts the
+    /// process named by `locked_game_exe`. It stays active even while that
+    /// process is not running, waiting for it to appear.
+    #[serde(default)]
+    pub locked_mode: bool,
+    /// Executable name (lower-cased) that GameMode targets when `locked_mode`
+    /// is true. Empty when locked mode is off.
+    #[serde(default)]
+    pub locked_game_exe: String,
 }
 
 impl Default for Config {
@@ -260,6 +269,8 @@ impl Default for Config {
             poll_interval_ms: 1500,
             close_to_tray: true,
             theme_dark: true,
+            locked_mode: false,
+            locked_game_exe: String::new(),
         }
     }
 }
@@ -485,6 +496,19 @@ impl Config {
         self.whitelist.push(crate::prelude::exe_name().to_ascii_lowercase());
         self.whitelist.sort();
         self.whitelist.dedup();
+        if !self.locked_game_exe.is_empty() {
+            self.locked_game_exe = self.locked_game_exe.to_ascii_lowercase();
+        }
+    }
+
+    /// The executable GameMode should target when locked mode is on.
+    /// Returns `None` when locked mode is off or the field is empty.
+    pub fn locked_target(&self) -> Option<&str> {
+        if self.locked_mode && !self.locked_game_exe.is_empty() {
+            Some(self.locked_game_exe.as_str())
+        } else {
+            None
+        }
     }
 
     /// True when `exe` (lower-cased) appears in the whitelist.

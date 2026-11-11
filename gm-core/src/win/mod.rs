@@ -5,6 +5,7 @@
 
 pub mod elevation;
 pub mod ipc;
+pub mod perf;
 pub mod power;
 pub mod process;
 pub mod services;
